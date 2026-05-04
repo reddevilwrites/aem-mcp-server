@@ -17,6 +17,12 @@ function optionalNumber(key: string, defaultValue: number): number {
   return isNaN(n) ? defaultValue : n;
 }
 
+function optionalBoolean(key: string, defaultValue: boolean): boolean {
+  const val = process.env[key];
+  if (val === undefined) return defaultValue;
+  return val.trim().toLowerCase() !== 'false';
+}
+
 export type AemPlatform = 'aemaacs' | 'aem65' | 'aem65lts';
 export type AemInstance = 'author' | 'publish';
 
@@ -59,6 +65,8 @@ export const config = {
     maxQueuedJobs: optionalNumber('AEM_JOB_HEALTH_MAX_QUEUED_JOBS', 100),
     maxActiveJobs: optionalNumber('AEM_JOB_HEALTH_MAX_ACTIVE_JOBS', 20),
     maxFailedJobs: optionalNumber('AEM_JOB_HEALTH_MAX_FAILED_JOBS', 10),
+    observabilityEnabled: optionalBoolean('AEM_JOB_OBSERVABILITY_ENABLED', true),
+    observabilityEventsLimit: optionalNumber('AEM_JOB_OBSERVABILITY_EVENTS_LIMIT', 500),
   },
   debug: {
     enabled: process.env['DEBUG'] === 'true',

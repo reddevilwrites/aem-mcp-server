@@ -6,10 +6,21 @@
  * they touch the network stack, but they don't need an AEM instance.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  assessLongRunningJobHealth: vi.fn(),
+}));
+
+vi.mock('../../src/tools/system-health.js', () => ({
+  assessLongRunningJobHealth: mocks.assessLongRunningJobHealth,
+}));
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { startHttpServer, HttpServerHandle } from '../../src/http-server.js';
+import { jobManager } from '../../src/job-manager.js';
+import { jobTelemetry } from '../../src/job-telemetry.js';
 
 const AUTH_TOKEN = 'test-token-1234567890abcdef';
 
@@ -30,10 +41,94 @@ function createTestMcpServer(): Server {
         description: 'Test tool',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'test_async_job',
+        description: 'Starts a test async job.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'test_async_pause_once',
+        description: 'Starts a test async job that pauses once.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'aem_job_status',
+        description: 'Test job status proxy.',
+        inputSchema: { type: 'object', properties: { jobId: { type: 'string' } } },
+      },
+      {
+        name: 'aem_job_observability',
+        description: 'Test job observability proxy.',
+        inputSchema: { type: 'object', properties: {} },
+      },
     ],
   }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args = {} } = request.params;
+    let result: unknown;
+
+    if (name === 'test_async_job') {
+      result = jobManager.start(
+        'test_async_job',
+        {},
+        async (ctx) => {
+          ctx.saveCheckpoint({ phase: 'scan', secret: 'hidden' });
+          await ctx.heartbeat({
+            checkpoint: { phase: 'complete', pagePaths: ['/content/private'] },
+            progressPercent: 50,
+            message: 'halfway',
+            force: true,
+          });
+          return { ok: true };
+        },
+        5,
+      );
+    } else if (name === 'test_async_pause_once') {
+      result = jobManager.start(
+        'test_async_pause_once',
+        {},
+        async (ctx) => {
+          const checkpoint = ctx.getCheckpoint<{ phase?: string }>();
+          if (checkpoint?.phase === 'paused-once') {
+            ctx.saveCheckpoint({ phase: 'resumed' });
+            return { resumed: true };
+          }
+          await ctx.heartbeat({
+            checkpoint: { phase: 'paused-once' },
+            progressPercent: 10,
+            message: 'before pause',
+            force: true,
+          });
+          return { shouldNotReach: true };
+        },
+        5,
+      );
+    } else if (name === 'aem_job_status') {
+      result = jobManager.getStatus(String((args as Record<string, unknown>)['jobId'] ?? ''));
+    } else if (name === 'aem_job_observability') {
+      const options = args as Record<string, unknown>;
+      result = jobTelemetry.snapshot({
+        jobId: options['jobId'] ? String(options['jobId']) : undefined,
+        includeEvents: Boolean(options['includeEvents']),
+        limit: options['limit'] ? Number(options['limit']) : undefined,
+      });
+    } else {
+      result = { ok: true };
+    }
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result) }],
+    };
+  });
   return server;
 }
+
+mocks.assessLongRunningJobHealth.mockResolvedValue({
+  action: 'continue',
+  reason: 'ok',
+  retryAfterMs: 1,
+  snapshot: {},
+});
 
 beforeAll(async () => {
   // port: 0 → kernel picks a free port; the returned handle exposes the
@@ -49,6 +144,89 @@ beforeAll(async () => {
 afterAll(async () => {
   await handle.close();
 });
+
+async function openSession(): Promise<string> {
+  const initRes = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'observability-test', version: '0.0.1' },
+      },
+    }),
+  });
+  expect(initRes.status).toBe(200);
+  await initRes.text();
+  const sessionId = initRes.headers.get('mcp-session-id');
+  expect(sessionId).toBeTruthy();
+  return sessionId!;
+}
+
+async function callTool<T>(
+  sessionId: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  const res = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+      'mcp-session-id': sessionId,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    }),
+  });
+  expect(res.status).toBe(200);
+  const payload = parseSseJson(await res.text()) as {
+    result: { content: Array<{ text: string }> };
+  };
+  return JSON.parse(payload.result.content[0]!.text) as T;
+}
+
+async function closeSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${baseUrl}/mcp`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+      'mcp-session-id': sessionId,
+    },
+  });
+  expect([200, 202, 204]).toContain(res.status);
+}
+
+function parseSseJson(text: string): unknown {
+  const dataLine = text.split('\n').find((l) => l.startsWith('data: '));
+  expect(dataLine).toBeTruthy();
+  return JSON.parse(dataLine!.slice('data: '.length));
+}
+
+async function pollJobStatus(sessionId: string, jobId: string, terminalStatus: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 1000;
+  let last: Record<string, unknown> = {};
+
+  while (Date.now() < deadline) {
+    last = await callTool<Record<string, unknown>>(sessionId, 'aem_job_status', { jobId });
+    if (last['status'] === terminalStatus) return last;
+    await new Promise(r => setTimeout(r, 10));
+  }
+
+  throw new Error(`Timed out waiting for ${terminalStatus}; last=${JSON.stringify(last)}`);
+}
 
 describe('GET /healthz', () => {
   it('returns 200 without auth', async () => {
@@ -223,6 +401,115 @@ describe('body limits and validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 // Capacity cap (regression: previously unbounded session map)
 // ───────────────────────────────────────────────────────────────────────────
+
+describe('async job observability over MCP', () => {
+  it('shows start, heartbeat, checkpoint, and completion for an async job', async () => {
+    jobTelemetry.clear();
+    mocks.assessLongRunningJobHealth.mockResolvedValue({
+      action: 'continue',
+      reason: 'ok',
+      retryAfterMs: 1,
+      snapshot: {},
+    });
+    const sessionId = await openSession();
+
+    try {
+      const started = await callTool<{ jobId: string }>(sessionId, 'test_async_job');
+      await pollJobStatus(sessionId, started.jobId, 'completed');
+
+      const observed = await callTool<{
+        jobs: Array<{
+          heartbeatCount: number;
+          checkpointSaveCount: number;
+          hasCheckpoint: boolean;
+          checkpointPhase?: string;
+        }>;
+        events: Array<{ type: string }>;
+      }>(sessionId, 'aem_job_observability', {
+        jobId: started.jobId,
+        includeEvents: true,
+      });
+
+      expect(observed.jobs[0]).toEqual(expect.objectContaining({
+        heartbeatCount: 1,
+        checkpointSaveCount: 2,
+        hasCheckpoint: true,
+        checkpointPhase: 'complete',
+      }));
+      expect(observed.events.map(e => e.type)).toEqual([
+        'job.started',
+        'job.running',
+        'job.checkpoint.saved',
+        'job.checkpoint.saved',
+        'job.heartbeat',
+        'job.completed',
+      ]);
+      expect(JSON.stringify(observed)).not.toContain('hidden');
+      expect(JSON.stringify(observed)).not.toContain('/content/private');
+    } finally {
+      await closeSession(sessionId);
+    }
+  });
+
+  it('shows pause and resume telemetry when the health guard pauses once', async () => {
+    jobTelemetry.clear();
+    mocks.assessLongRunningJobHealth
+      .mockResolvedValueOnce({
+        action: 'pause',
+        reason: 'health guard pause',
+        retryAfterMs: 50,
+        snapshot: {},
+      })
+      .mockResolvedValue({
+        action: 'continue',
+        reason: 'ok',
+        retryAfterMs: 1,
+        snapshot: {},
+      });
+    const sessionId = await openSession();
+
+    try {
+      const started = await callTool<{ jobId: string }>(sessionId, 'test_async_pause_once');
+      await pollJobStatus(sessionId, started.jobId, 'paused');
+      await pollJobStatus(sessionId, started.jobId, 'completed');
+
+      const observed = await callTool<{
+        jobs: Array<{
+          pauseCount: number;
+          resumeCount: number;
+          checkpointSaveCount: number;
+          hasCheckpoint: boolean;
+          checkpointPhase?: string;
+        }>;
+        events: Array<{ type: string }>;
+      }>(sessionId, 'aem_job_observability', {
+        jobId: started.jobId,
+        includeEvents: true,
+      });
+
+      expect(observed.jobs[0]).toEqual(expect.objectContaining({
+        pauseCount: 1,
+        resumeCount: 1,
+        checkpointSaveCount: 2,
+        hasCheckpoint: true,
+        checkpointPhase: 'resumed',
+      }));
+      expect(observed.events.map(e => e.type)).toEqual([
+        'job.started',
+        'job.running',
+        'job.checkpoint.saved',
+        'job.heartbeat',
+        'job.paused',
+        'job.resumed',
+        'job.running',
+        'job.checkpoint.saved',
+        'job.completed',
+      ]);
+    } finally {
+      await closeSession(sessionId);
+    }
+  });
+});
 
 describe('session capacity cap', () => {
   it('rejects an invalid MCP_MAX_SESSIONS env value instead of disabling the cap', async () => {

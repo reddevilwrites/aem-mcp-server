@@ -17,7 +17,7 @@ This file is intended for coding agents and maintainers. It documents what exist
 
 ## Current Scope
 
-The server currently exposes 14 tools. Two are write-tier (`aem_extend_asset_expiry`, `aem_extend_asset_expiry`'s optional publish phase via `/bin/replicate.json`); the rest are read-only.
+The server currently exposes 15 tools. Two are write-tier (`aem_extend_asset_expiry`, `aem_extend_asset_expiry`'s optional publish phase via `/bin/replicate.json`); the rest are read-only.
 
 1. `aem_component_usage`
 2. `aem_system_health`
@@ -33,6 +33,7 @@ The server currently exposes 14 tools. Two are write-tier (`aem_extend_asset_exp
 12. `aem_asset_expiry_report`
 13. `aem_extend_asset_expiry` *(write — author only — optional publish with consent flag)*
 14. `aem_job_status`
+15. `aem_job_observability`
 
 These are defined and dispatched from [src/index.ts](src/index.ts). The tool factory `createMcpServer()` in the same file is required by the HTTP transport — the MCP SDK's `Server.connect()` can only attach to one transport per instance, so each new HTTP session creates a fresh Server.
 
@@ -398,6 +399,18 @@ Behavior:
 
 - Core usability tool for long-running scans
 - Must remain understandable to non-authors of this codebase
+
+### `aem_job_observability`
+
+Purpose:
+
+- Inspect read-only in-memory telemetry for async jobs so maintainers can verify lifecycle, heartbeat, checkpoint, pause/resume, completion, failure, and cleanup behavior without reading logs.
+
+Behavior:
+
+- Diagnostic only; not a replacement for `aem_job_status`
+- Supports filtering by `jobId` and `toolName`, optional recent lifecycle events, and a bounded in-memory event buffer
+- Does not expose checkpoint payload contents, AEM credentials, request bodies, or page/asset data
 
 ## Development Rules
 

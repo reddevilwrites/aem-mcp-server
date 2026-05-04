@@ -267,6 +267,21 @@ Use `aem_job_status` for the job ID returned by the previous async tool call and
 For each async validation, keep polling `aem_job_status` until terminal state, then summarize whether the async tool is operationally usable.
 ```
 
+#### `aem_job_observability`
+
+Purpose:
+- Validate async lifecycle telemetry, checkpoint saves, and pause/resume signals without reading server logs
+
+Prompts:
+
+```text
+After an async tool returns a job ID, call `aem_job_observability` with that `jobId` and `includeEvents=true`. Confirm whether the telemetry shows job start, heartbeat/progress, checkpoint saves or `hasCheckpoint`, and terminal completion or failure.
+```
+
+```text
+For a health-paused async job, call `aem_job_observability` with the job ID and confirm `pauseCount`, `resumeCount`, `hasCheckpoint`, and recent lifecycle events show pause then resume.
+```
+
 ### Environment-Specific Rule
 
 #### `aem_replication_queue`

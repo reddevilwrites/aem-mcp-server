@@ -15,6 +15,7 @@
  *  10. aem_page_property_report  — Report pages by JCR property; MSM-aware (AEMaaCS + 6.5/AMS)
  *  11. aem_replication_queue     — Replication agent queue diagnostics (⚠️  AEM 6.5 / AMS ONLY)
  *  12. aem_job_status            — Check status of a long-running async job
+ *  13. aem_job_observability     — Inspect read-only async job telemetry
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -27,6 +28,7 @@ import {
 
 import { logger } from './utils/logger.js';
 import { jobManager } from './job-manager.js';
+import { jobTelemetry } from './job-telemetry.js';
 import { startHttpServer } from './http-server.js';
 
 // Tool implementations
@@ -471,6 +473,35 @@ const TOOLS: Tool[] = [
       required: ['jobId'],
     },
   },
+
+  {
+    name: 'aem_job_observability',
+    description:
+      'Read diagnostic telemetry for async MCP jobs. Use this to confirm async dispatch, ' +
+      'heartbeats, checkpoint saves, health-based pause/resume, completion, failure, and cleanup. ' +
+      'This is read-only and does not expose checkpoint payload contents, AEM credentials, request bodies, or page/asset data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: {
+          type: 'string',
+          description: 'Optional job ID to inspect.',
+        },
+        toolName: {
+          type: 'string',
+          description: 'Optional tool name filter, e.g. aem_broken_link_scan.',
+        },
+        includeEvents: {
+          type: 'boolean',
+          description: 'Include recent structured lifecycle events. Default: false.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of recent events to return when includeEvents=true. Capped by AEM_JOB_OBSERVABILITY_EVENTS_LIMIT.',
+        },
+      },
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -637,6 +668,14 @@ async function dispatch(
 
     case 'aem_job_status':
       return jobManager.getStatus(String(args['jobId'] ?? ''));
+
+    case 'aem_job_observability':
+      return jobTelemetry.snapshot({
+        jobId: args['jobId'] ? String(args['jobId']) : undefined,
+        toolName: args['toolName'] ? String(args['toolName']) : undefined,
+        includeEvents: Boolean(args['includeEvents']),
+        limit: args['limit'] ? Number(args['limit']) : undefined,
+      });
 
     default:
       throw new Error(`Unknown tool: ${name}`);
