@@ -1,0 +1,36 @@
+{
+  "name": "aem-mcp-server",
+  "version": "1.0.0",
+  "description": "AEM MCP Server -- system health, content analytics, MSM, workflows, and more. AEMaaCS-first with AEM 6.5/AMS dual-path support.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "aem-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch --preserveWatchOutput",
+    "dev": "npm run watch",
+    "prestart": "npm run build",
+    "start": "node dist/index.js",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:e2e": "vitest run tests/integration",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

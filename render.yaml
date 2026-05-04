@@ -1,0 +1,63 @@
+# Render deployment manifest for the AEM MCP Server.
+#
+# What this gives you on Render's free tier:
+#   - HTTPS endpoint at https://<service-name>.onrender.com/mcp
+#   - Auto-deploy on push to main (set `autoDeploy: true` per service)
+#   - Liveness probing via /healthz
+#   - 512 MB RAM, sleeps after 15 min idle (cold start ~30 s on first hit)
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. On Render → New + → Blueprint → connect this repo.
+#   3. Render reads this file, creates the service, and prompts you for the
+#      env vars marked `sync: false` below.
+#   4. Hit https://<service-name>.onrender.com/healthz to verify, then point
+#      claude.ai's Custom Connector at https://<service-name>.onrender.com/mcp
+#      with the bearer token you supplied.
+
+services:
+  - type: web
+    name: aem-mcp-server
+    runtime: docker
+    plan: free
+    region: oregon # change to the region closest to your AEM author
+    branch: main
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+
+    envVars:
+      # ── MCP server config ───────────────────────────────────────────────
+      - key: MCP_AUTH_TOKEN
+        # Bearer token clients must send. Render auto-generates a strong value
+        # the first time the service deploys; you can read/rotate it from the
+        # service's Environment tab.
+        generateValue: true
+
+      # ── AEM connection — fill these in via the Render dashboard ─────────
+      - key: AEM_HOST
+        sync: false # e.g. https://author-p123-e456.adobeaemcloud.com
+      - key: AEM_USERNAME
+        sync: false # service-account user / dev token "username"
+      - key: AEM_PASSWORD
+        sync: false # service-account password / dev token value
+
+      # ── Required platform / instance hints ──────────────────────────────
+      - key: AEM_PLATFORM
+        value: aemaacs # one of: aemaacs | aem65 | aem65lts
+      - key: AEM_INSTANCE
+        value: author # this server is author-only by design
+
+      # ── Optional content roots (override only if your site differs) ─────
+      - key: AEM_CONTENT_ROOT
+        value: /content
+      - key: AEM_DAM_ROOT
+        value: /content/dam
+
+      # ── Async-job tuning (sane free-tier defaults) ──────────────────────
+      - key: AEM_QUERY_ASYNC_THRESHOLD
+        value: '500'
+      - key: AEM_QUERY_PAGE_SIZE
+        value: '200'
+      - key: AEM_BATCH_DELAY_MS
+        value: '200'

@@ -1,0 +1,16 @@
+.git
+.github
+.vscode
+node_modules
+dist
+coverage
+tests
+*.log
+.env
+.env.*
+!.env.example
+README.md
+docs
+memory
+*.md
+!AGENTS.md
