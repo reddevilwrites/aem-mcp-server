@@ -1,6 +1,6 @@
 import { queryBuilder } from '../query-builder.js';
 import { aemClient } from '../aem-client.js';
-import { jobManager, JobStartResult } from '../job-manager.js';
+import { jobManager, JobExecutionContext, JobStartResult } from '../job-manager.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -57,7 +57,7 @@ export async function clientlibAnalysis(
     return jobManager.start(
       'aem_clientlib_analysis',
       { rootPath, channel },
-      () => runClientlibAnalysis(rootPath, channel),
+      (ctx) => runClientlibAnalysis(rootPath, channel, ctx),
       Math.max(15_000, total * 30),
     );
   }
@@ -68,7 +68,14 @@ export async function clientlibAnalysis(
 async function runClientlibAnalysis(
   rootPath: string,
   channel: string | undefined,
+  ctx?: JobExecutionContext,
 ): Promise<ClientlibAnalysisResult> {
+  await ctx?.heartbeat({
+    progressPercent: 5,
+    message: `Querying client libraries under ${rootPath}.`,
+    force: true,
+  });
+
   const result = await queryBuilder.queryAll<Record<string, unknown>>(
     {
       type: 'cq:ClientLibraryFolder',
@@ -81,7 +88,14 @@ async function runClientlibAnalysis(
 
   const allClientlibs: ClientlibEntry[] = [];
 
-  for (const hit of result.hits) {
+  for (const [index, hit] of result.hits.entries()) {
+    if (index % 25 === 0) {
+      await ctx?.heartbeat({
+        progressPercent: 10 + Math.round((index / Math.max(result.hits.length, 1)) * 70),
+        message: `Inspecting client library ${index + 1}/${result.hits.length}.`,
+      });
+    }
+
     const path = String(hit['jcr:path'] ?? '');
     if (!path) continue;
 

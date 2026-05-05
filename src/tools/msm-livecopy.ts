@@ -1,6 +1,6 @@
 import { queryBuilder } from '../query-builder.js';
 import { aemClient } from '../aem-client.js';
-import { jobManager, JobStartResult } from '../job-manager.js';
+import { jobManager, JobExecutionContext, JobStartResult } from '../job-manager.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -55,7 +55,7 @@ export async function msmLiveCopyStatus(
     return jobManager.start(
       'aem_msm_livecopy_status',
       { rootPath, outOfSyncOnly },
-      () => runMsmAnalysis(rootPath, outOfSyncOnly),
+      (ctx) => runMsmAnalysis(rootPath, outOfSyncOnly, ctx),
       Math.max(20_000, total * 50),
     );
   }
@@ -66,10 +66,16 @@ export async function msmLiveCopyStatus(
 async function runMsmAnalysis(
   rootPath: string,
   outOfSyncOnly: boolean,
+  ctx?: JobExecutionContext,
 ): Promise<MsmLiveCopyResult> {
   const recommendations: string[] = [];
 
   // Query all LiveSyncConfig nodes — these are the live copy roots
+  await ctx?.heartbeat({
+    progressPercent: 5,
+    message: `Querying MSM live copy configuration under ${rootPath}.`,
+    force: true,
+  });
   const result = await queryBuilder.queryAll<Record<string, unknown>>(
     {
       type: 'cq:LiveSyncConfig',
@@ -82,7 +88,14 @@ async function runMsmAnalysis(
 
   const liveCopies: LiveCopyEntry[] = [];
 
-  for (const hit of result.hits) {
+  for (const [index, hit] of result.hits.entries()) {
+    if (index % 25 === 0) {
+      await ctx?.heartbeat({
+        progressPercent: 10 + Math.round((index / Math.max(result.hits.length, 1)) * 75),
+        message: `Inspecting live copy ${index + 1}/${result.hits.length}.`,
+      });
+    }
+
     const configPath = String(hit['jcr:path'] ?? '');
     // LiveSyncConfig lives at: /content/site/livecopy/jcr:content/...
     // The live copy page path is two levels up from the config node

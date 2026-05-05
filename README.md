@@ -132,6 +132,7 @@ Optional (all have sensible defaults):
 | `AEM_QUERY_ASYNC_THRESHOLD` | `500` | Above this candidate count, tools dispatch async |
 | `AEM_QUERY_PAGE_SIZE` | `200` | QueryBuilder pagination |
 | `AEM_BATCH_DELAY_MS` | `200` | Pause between batches in async tools |
+| `AEM_JOB_MAX_CONCURRENT_JOBS` | `2` | Max async MCP jobs running at once; extra jobs stay queued |
 | `AEM_JOB_OBSERVABILITY_ENABLED` | `true` | Enable read-only async job telemetry |
 | `AEM_JOB_OBSERVABILITY_EVENTS_LIMIT` | `500` | Retained lifecycle events for `aem_job_observability` |
 | `MCP_MAX_SESSIONS` | `100` | Cap on concurrent HTTP sessions |

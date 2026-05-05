@@ -56,6 +56,7 @@ export const config = {
     batchDelayMs: optionalNumber('AEM_BATCH_DELAY_MS', 200),
   },
   jobs: {
+    maxConcurrentJobs: optionalNumber('AEM_JOB_MAX_CONCURRENT_JOBS', 2),
     ttlMs: optionalNumber('AEM_JOB_TTL_MS', 3_600_000),
     healthPollIntervalMs: optionalNumber('AEM_JOB_HEALTH_POLL_INTERVAL_MS', 15_000),
     healthRetryAfterMs: optionalNumber('AEM_JOB_HEALTH_RETRY_AFTER_MS', 30_000),

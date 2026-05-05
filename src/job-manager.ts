@@ -65,11 +65,18 @@ class PauseJobError extends Error {
  *
  * Completed jobs are retained for TTL (default 1 hour) then cleaned up.
  */
-class JobManager {
+type JobExecutor<T = unknown> = (ctx: JobExecutionContext) => Promise<T>;
+
+export class JobManager {
   private jobs = new Map<string, Job>();
+  private executors = new Map<string, JobExecutor>();
+  private queue: string[] = [];
+  private queuedJobs = new Set<string>();
+  private runningJobs = new Set<string>();
+  private drainScheduled = false;
   private cleanupTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  constructor(private readonly maxConcurrentJobs = Math.max(1, config.jobs.maxConcurrentJobs)) {
     // Periodic cleanup every 10 minutes
     this.cleanupTimer = setInterval(() => this.cleanup(), 600_000);
     // Allow process to exit even with timer active
@@ -87,7 +94,7 @@ class JobManager {
   start<T>(
     toolName: string,
     params: Record<string, unknown>,
-    executor: (ctx: JobExecutionContext) => Promise<T>,
+    executor: JobExecutor<T>,
     estimatedMs = 30_000,
   ): JobStartResult {
     const id = randomUUID();
@@ -101,16 +108,16 @@ class JobManager {
     };
 
     this.jobs.set(id, job);
+    this.executors.set(id, executor as JobExecutor);
     jobTelemetry.record({
       type: 'job.started',
       jobId: id,
       toolName,
       status: job.status,
     });
-    logger.info(`Job started: ${id} (${toolName})`);
+    logger.info(`Job queued: ${id} (${toolName})`);
 
-    // Fire-and-forget — do NOT await
-    void this.run(id, executor);
+    this.enqueue(id);
 
     const checkAfterMs = Math.max(estimatedMs, 5_000);
     return {
@@ -123,7 +130,38 @@ class JobManager {
     };
   }
 
-  private async run<T>(id: string, executor: (ctx: JobExecutionContext) => Promise<T>): Promise<void> {
+  private enqueue(id: string): void {
+    if (!this.jobs.has(id) || this.queuedJobs.has(id)) return;
+    this.queue.push(id);
+    this.queuedJobs.add(id);
+    this.scheduleDrain();
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainScheduled) return;
+    this.drainScheduled = true;
+    setImmediate(() => {
+      this.drainScheduled = false;
+      this.drainQueue();
+    });
+  }
+
+  private drainQueue(): void {
+    while (this.runningJobs.size < this.maxConcurrentJobs && this.queue.length > 0) {
+      const id = this.queue.shift()!;
+      this.queuedJobs.delete(id);
+
+      const job = this.jobs.get(id);
+      const executor = this.executors.get(id);
+      if (!job || !executor) continue;
+      if (job.status !== 'pending' && job.status !== 'paused') continue;
+
+      this.runningJobs.add(id);
+      void this.run(id, executor);
+    }
+  }
+
+  private async run<T>(id: string, executor: JobExecutor<T>): Promise<void> {
     const job = this.jobs.get(id);
     if (!job) return;
 
@@ -131,6 +169,8 @@ class JobManager {
     job.status = 'running';
     job.startedAt ??= new Date();
     job.progressMessage = 'Job is running.';
+    job.resumeAfter = undefined;
+    job.pauseReason = undefined;
     if (wasPaused) {
       jobTelemetry.record({
         type: 'job.resumed',
@@ -159,6 +199,8 @@ class JobManager {
       job.completedAt = new Date();
       job.progressPercent = 100;
       job.progressMessage = 'Job completed successfully.';
+      job.resumeAfter = undefined;
+      job.pauseReason = undefined;
       jobTelemetry.record({
         type: 'job.completed',
         jobId: id,
@@ -187,7 +229,7 @@ class JobManager {
           reason: err.message,
         });
         logger.warn(`Job paused: ${id} (${job.toolName})`, err.message);
-        this.scheduleResume(id, executor, err.retryAfterMs);
+        this.scheduleResume(id, err.retryAfterMs);
         return;
       }
 
@@ -195,6 +237,8 @@ class JobManager {
       job.error = err instanceof Error ? err.message : String(err);
       job.completedAt = new Date();
       job.progressMessage = 'Job failed.';
+      job.resumeAfter = undefined;
+      job.pauseReason = undefined;
       jobTelemetry.record({
         type: 'job.failed',
         jobId: id,
@@ -206,12 +250,19 @@ class JobManager {
         reason: job.error,
       });
       logger.error(`Job failed: ${id} (${job.toolName})`, err);
+    } finally {
+      this.runningJobs.delete(id);
+      const current = this.jobs.get(id);
+      if (current?.status === 'completed' || current?.status === 'failed') {
+        this.executors.delete(id);
+      }
+      this.scheduleDrain();
     }
   }
 
-  private scheduleResume<T>(id: string, executor: (ctx: JobExecutionContext) => Promise<T>, retryAfterMs: number): void {
+  private scheduleResume(id: string, retryAfterMs: number): void {
     const timer = setTimeout(() => {
-      void this.run(id, executor);
+      this.enqueue(id);
     }, retryAfterMs);
     timer.unref();
   }
@@ -244,8 +295,10 @@ class JobManager {
       const pct = Math.min(Math.round((elapsed / estimated) * 100), 95);
       return {
         ...base,
-        progressPercent: job.progressPercent ?? pct,
-        message: job.progressMessage ?? 'Job is still running. Check again shortly.',
+        progressPercent: job.status === 'pending' ? 0 : (job.progressPercent ?? pct),
+        message: job.status === 'pending'
+          ? 'Job is queued and waiting for an execution slot.'
+          : (job.progressMessage ?? 'Job is still running. Check again shortly.'),
       };
     }
 
@@ -300,6 +353,9 @@ class JobManager {
           reason: isPausedExpired ? 'stale paused job' : 'expired terminal job',
         });
         this.jobs.delete(id);
+        this.executors.delete(id);
+        this.queuedJobs.delete(id);
+        this.queue = this.queue.filter(queuedId => queuedId !== id);
         removed++;
         if (isPausedExpired) {
           logger.warn(

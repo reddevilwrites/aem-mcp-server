@@ -8,7 +8,7 @@ vi.mock('../../src/tools/system-health.js', () => ({
   assessLongRunningJobHealth: mocks.assessLongRunningJobHealth,
 }));
 
-import { jobManager } from '../../src/job-manager.js';
+import { jobManager, JobManager } from '../../src/job-manager.js';
 import { jobTelemetry } from '../../src/job-telemetry.js';
 
 function waitForStatus(jobId: string, status: string): Promise<void> {
@@ -30,6 +30,32 @@ function waitForStatus(jobId: string, status: string): Promise<void> {
   });
 }
 
+function waitForCondition(predicate: () => boolean, description: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 1000;
+    const poll = (): void => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error(`Timed out waiting for ${description}`));
+        return;
+      }
+      setTimeout(poll, 5);
+    };
+    poll();
+  });
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   jobTelemetry.clear();
@@ -42,6 +68,45 @@ beforeEach(() => {
 });
 
 describe('jobManager observability', () => {
+  it('defers execution and respects the configured concurrency limit', async () => {
+    const manager = new JobManager(2);
+    const releases = [deferred(), deferred(), deferred()];
+    const startedIds: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+
+    const jobs = releases.map((release, index) => manager.start(
+      'unit_queued_job',
+      { index },
+      async () => {
+        startedIds.push(String(index));
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await release.promise;
+        active--;
+        return { index };
+      },
+      5,
+    ));
+
+    expect(active).toBe(0);
+
+    await waitForCondition(() => active === 2, 'first two jobs to start');
+    expect(maxActive).toBe(2);
+    expect((manager.getStatus(jobs[2]!.jobId) as { status?: string }).status).toBe('pending');
+
+    releases[0]!.resolve();
+    await waitForCondition(() => startedIds.includes('2'), 'queued third job to start');
+    expect(maxActive).toBe(2);
+
+    releases[1]!.resolve();
+    releases[2]!.resolve();
+    await waitForCondition(
+      () => jobs.every(job => (manager.getStatus(job.jobId) as { status?: string }).status === 'completed'),
+      'all queued jobs to complete',
+    );
+  });
+
   it('records start, heartbeat, checkpoint, and completion for a successful job', async () => {
     const started = jobManager.start(
       'unit_observed_success',
@@ -141,6 +206,8 @@ describe('jobManager observability', () => {
 
     await waitForStatus(started.jobId, 'paused');
     await waitForStatus(started.jobId, 'completed');
+    const completedStatus = jobManager.getStatus(started.jobId) as { resumeAfter?: string };
+    expect(completedStatus.resumeAfter).toBeUndefined();
 
     const snapshot = jobTelemetry.snapshot({ jobId: started.jobId, includeEvents: true });
     expect(snapshot.jobs[0]).toEqual(expect.objectContaining({

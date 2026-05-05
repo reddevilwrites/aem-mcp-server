@@ -1,5 +1,5 @@
 import { aemClient } from '../aem-client.js';
-import { jobManager, JobStartResult } from '../job-manager.js';
+import { jobManager, JobExecutionContext, JobStartResult } from '../job-manager.js';
 import { logger } from '../utils/logger.js';
 
 export interface AuditLogInput {
@@ -64,7 +64,7 @@ export async function auditLogQuery(
     return jobManager.start(
       'aem_audit_log',
       input as Record<string, unknown>,
-      () => runAuditQuery(resourcePath, user, startDate, endDate, eventType, limit),
+      (ctx) => runAuditQuery(resourcePath, user, startDate, endDate, eventType, limit, ctx),
       15_000,
     );
   }
@@ -79,7 +79,14 @@ async function runAuditQuery(
   endDate: string | undefined,
   eventType: string | undefined,
   limit: number,
+  ctx?: JobExecutionContext,
 ): Promise<AuditLogResult> {
+  await ctx?.heartbeat({
+    progressPercent: 10,
+    message: 'Querying Granite audit log events.',
+    force: true,
+  });
+
   const params: Record<string, string> = {
     '_charset_': 'UTF-8',
     'p.limit': String(limit),

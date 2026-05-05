@@ -63,7 +63,9 @@ Desktop.ini
 .claude/
 .codex/
 .agents/
+CLAUDE.md
 
 # Docker and deployment local overrides
 docker-compose.override.yml
 render.local.yaml
+.gitnexus/

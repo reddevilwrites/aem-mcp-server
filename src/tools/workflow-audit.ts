@@ -1,5 +1,5 @@
 import { queryBuilder } from '../query-builder.js';
-import { jobManager, JobStartResult } from '../job-manager.js';
+import { jobManager, JobExecutionContext, JobStartResult } from '../job-manager.js';
 import { config } from '../config.js';
 
 export interface WorkflowAuditInput {
@@ -57,7 +57,7 @@ export async function workflowAudit(
     return jobManager.start(
       'aem_workflow_audit',
       { staleThresholdHours, modelPath, includeFailed },
-      () => runWorkflowAudit(staleThresholdHours, modelPath, includeFailed),
+      (ctx) => runWorkflowAudit(staleThresholdHours, modelPath, includeFailed, ctx),
       Math.max(15_000, runningCount * 20),
     );
   }
@@ -69,6 +69,7 @@ async function runWorkflowAudit(
   staleThresholdHours: number,
   modelPath: string | undefined,
   includeFailed: boolean,
+  ctx?: JobExecutionContext,
 ): Promise<WorkflowAuditResult> {
   const recommendations: string[] = [];
   const thresholdMs = staleThresholdHours * 60 * 60 * 1000;
@@ -83,6 +84,11 @@ async function runWorkflowAudit(
   };
 
   // Fetch RUNNING instances
+  await ctx?.heartbeat({
+    progressPercent: 10,
+    message: 'Querying running workflow instances.',
+    force: true,
+  });
   const runningResult = await queryBuilder.queryAll<Record<string, string>>(
     { ...baseParams, property: 'status', 'property.value': 'RUNNING' },
     5_000,
@@ -106,6 +112,10 @@ async function runWorkflowAudit(
   // Fetch FAILED instances
   let failedInstances: WorkflowInstance[] = [];
   if (includeFailed) {
+    await ctx?.heartbeat({
+      progressPercent: 65,
+      message: 'Querying failed workflow instances.',
+    });
     const failedResult = await queryBuilder.queryAll<Record<string, string>>(
       { ...baseParams, property: 'status', 'property.value': 'FAILED' },
       5_000,

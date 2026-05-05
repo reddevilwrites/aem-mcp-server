@@ -1,5 +1,5 @@
 import { queryBuilder } from '../query-builder.js';
-import { jobManager, JobStartResult } from '../job-manager.js';
+import { jobManager, JobExecutionContext, JobStartResult } from '../job-manager.js';
 import { config } from '../config.js';
 import { extractPagePath } from '../utils/path-utils.js';
 
@@ -51,7 +51,7 @@ export async function componentUsage(
     return jobManager.start(
       'aem_component_usage',
       { resourceType, searchPath },
-      () => runComponentUsage(resourceType, searchPath),
+      (ctx) => runComponentUsage(resourceType, searchPath, ctx),
       estimateDuration(total),
     );
   }
@@ -62,7 +62,14 @@ export async function componentUsage(
 async function runComponentUsage(
   resourceType: string,
   searchPath: string,
+  ctx?: JobExecutionContext,
 ): Promise<ComponentUsageResult> {
+  await ctx?.heartbeat({
+    progressPercent: 5,
+    message: `Querying component usage for "${resourceType}".`,
+    force: true,
+  });
+
   const result = await queryBuilder.queryAll<{ 'jcr:path': string }>(
     {
       type: 'nt:base',
@@ -88,6 +95,8 @@ async function runComponentUsage(
   const pages: ComponentUsagePage[] = Array.from(pageMap.entries()).map(
     ([pagePath, componentPaths]) => ({ pagePath, componentPaths }),
   );
+
+  ctx?.setProgress(95, `Grouped ${result.hits.length} component node(s) by page.`);
 
   return {
     resourceType,
