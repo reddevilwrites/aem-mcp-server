@@ -107,6 +107,60 @@ describe('pagePropertyReport', () => {
     );
   });
 
+  it('uses an existence predicate and fallback jcr:content reads for indexed property reports without a value filter', async () => {
+    vi.mocked(queryBuilder.queryAll).mockResolvedValue({
+      hits: [
+        { 'jcr:path': '/content/wknd/language-masters/en' },
+        {
+          'jcr:path': '/content/wknd/language-masters/en/adventures',
+          'jcr:content/cq:template': '/conf/wknd/settings/wcm/templates/adventure-page',
+        },
+      ],
+      total: 2,
+      more: false,
+    });
+    vi.mocked(aemClient.getNode).mockResolvedValue({
+      'cq:template': '/conf/wknd/settings/wcm/templates/page-content',
+    });
+
+    const result = await pagePropertyReport({
+      property: 'cq:template',
+      rootPath: '/content/wknd/language-masters/en',
+      maxPages: 200,
+    });
+
+    expect(queryBuilder.queryAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        property: 'jcr:content/cq:template',
+        'p.properties': 'jcr:path jcr:content/cq:template',
+      }),
+      200,
+    );
+    expect(aemClient.getNode).toHaveBeenCalledWith(
+      '/content/wknd/language-masters/en/jcr:content',
+    );
+    expect('pages' in result && result.pages).toEqual([
+      {
+        pagePath: '/content/wknd/language-masters/en',
+        propertyValue: '/conf/wknd/settings/wcm/templates/page-content',
+        isMissing: false,
+      },
+      {
+        pagePath: '/content/wknd/language-masters/en/adventures',
+        propertyValue: '/conf/wknd/settings/wcm/templates/adventure-page',
+        isMissing: false,
+      },
+    ]);
+    expect('telemetry' in result && result.telemetry).toMatchObject({
+      strategy: 'fast-indexed-query',
+      candidatePageCount: 2,
+      queryHitValueCount: 1,
+      fallbackReadCount: 1,
+      fallbackValueCount: 1,
+      missingValueCount: 0,
+    });
+  });
+
   it('matches substring values during batched scans for unindexed properties', async () => {
     vi.mocked(queryBuilder.queryAll).mockResolvedValue({
       hits: [

@@ -55,6 +55,21 @@ export interface PagePropertyReportResult {
   };
   recommendations: string[];
   indexWarning?: string;
+  telemetry?: PagePropertyReportTelemetry;
+}
+
+export interface PagePropertyReportTelemetry {
+  strategy: 'fast-indexed-query' | 'batched-property-scan';
+  propertyReadPath: string;
+  candidatePageCount: number;
+  returnedPageCount: number;
+  queryHitValueCount: number;
+  queryHitValueSources?: Record<string, number>;
+  fallbackReadCount: number;
+  fallbackValueCount: number;
+  missingValueCount: number;
+  readFailureCount: number;
+  sampleHitKeys?: string[];
 }
 
 /**
@@ -128,13 +143,18 @@ async function runPropertyReport(
   }
 
   let pages: PagePropertyEntry[] = [];
+  let telemetry: PagePropertyReportTelemetry;
 
   if (isKnownIndexed && !reportMissing) {
     // Fast path: use QueryBuilder with property filter
-    pages = await fastIndexedQuery(property, propertyValue, rootPath, maxPages);
+    const report = await fastIndexedQuery(property, propertyValue, rootPath, maxPages);
+    pages = report.pages;
+    telemetry = report.telemetry;
   } else {
     // Slow path: fetch all pages and check property in-memory (batched)
-    pages = await batchedPropertyScan(property, propertyValue, reportMissing, rootPath, maxPages, ctx);
+    const report = await batchedPropertyScan(property, propertyValue, reportMissing, rootPath, maxPages, ctx);
+    pages = report.pages;
+    telemetry = report.telemetry;
   }
 
   // Recommendations
@@ -175,6 +195,7 @@ async function runPropertyReport(
     },
     recommendations,
     indexWarning,
+    telemetry,
   };
 }
 
@@ -185,31 +206,97 @@ async function fastIndexedQuery(
   propertyValue: string | undefined,
   rootPath: string,
   maxPages: number,
-): Promise<PagePropertyEntry[]> {
+): Promise<{ pages: PagePropertyEntry[]; telemetry: PagePropertyReportTelemetry }> {
+  const propertyPath = `jcr:content/${property}`;
   const params: Record<string, string | number | boolean> = {
     type: 'cq:Page',
     path: rootPath,
     'p.hits': 'selective',
-    'p.properties': `jcr:path jcr:content/${property}`,
+    'p.properties': `jcr:path ${propertyPath}`,
   };
 
   if (propertyValue !== undefined) {
     if (supportsScopedFulltext(property)) {
       params['fulltext'] = propertyValue;
-      params['fulltext.relPath'] = `jcr:content/${property}`;
+      params['fulltext.relPath'] = propertyPath;
     } else {
-      params['property'] = `jcr:content/${property}`;
+      params['property'] = propertyPath;
       params['property.value'] = propertyValue;
     }
+  } else {
+    params['property'] = propertyPath;
   }
+
+  logger.debug('[page-property-report] Fast indexed query starting', {
+    property,
+    rootPath,
+    maxPages,
+    hasValueFilter: propertyValue !== undefined,
+    propertyPath,
+  });
 
   const result = await queryBuilder.queryAll<Record<string, unknown>>(params, maxPages);
 
-  return result.hits.map(hit => ({
-    pagePath: String(hit['jcr:path'] ?? ''),
-    propertyValue: extractProperty(hit, property),
-    isMissing: false,
-  }));
+  const telemetry: PagePropertyReportTelemetry = {
+    strategy: 'fast-indexed-query',
+    propertyReadPath: propertyPath,
+    candidatePageCount: result.hits.length,
+    returnedPageCount: 0,
+    queryHitValueCount: 0,
+    queryHitValueSources: {},
+    fallbackReadCount: 0,
+    fallbackValueCount: 0,
+    missingValueCount: 0,
+    readFailureCount: 0,
+    sampleHitKeys: result.hits[0] ? Object.keys(result.hits[0]).slice(0, 12) : undefined,
+  };
+
+  const pages: PagePropertyEntry[] = [];
+
+  for (const hit of result.hits) {
+    const pagePath = String(hit['jcr:path'] ?? '');
+    let propertyRead = extractPropertyWithSource(hit, property);
+    if (propertyRead.value !== null) {
+      telemetry.queryHitValueCount++;
+      if (propertyRead.source) {
+        telemetry.queryHitValueSources![propertyRead.source] =
+          (telemetry.queryHitValueSources![propertyRead.source] ?? 0) + 1;
+      }
+    }
+
+    if (propertyRead.value === null && pagePath) {
+      telemetry.fallbackReadCount++;
+      try {
+        const jcrContent = await aemClient.getNode<Record<string, unknown>>(`${pagePath}/jcr:content`);
+        propertyRead = {
+          value: normalizePropertyValue(jcrContent[property]),
+          source: 'fallback-jcr-content',
+        };
+        if (propertyRead.value !== null) {
+          telemetry.fallbackValueCount++;
+        }
+      } catch (e) {
+        telemetry.readFailureCount++;
+        logger.warn(`[page-property-report] Could not fallback-read ${property} for ${pagePath}`, e);
+      }
+    }
+
+    if (propertyRead.value === null) {
+      telemetry.missingValueCount++;
+      continue;
+    }
+
+    pages.push({
+      pagePath,
+      propertyValue: propertyRead.value,
+      isMissing: false,
+    });
+  }
+
+  telemetry.returnedPageCount = pages.length;
+  logger.info('[page-property-report] Fast indexed query completed', telemetry);
+
+  return { pages, telemetry };
 }
 
 async function batchedPropertyScan(
@@ -219,7 +306,7 @@ async function batchedPropertyScan(
   rootPath: string,
   maxPages: number,
   ctx?: JobExecutionContext,
-): Promise<PagePropertyEntry[]> {
+): Promise<{ pages: PagePropertyEntry[]; telemetry: PagePropertyReportTelemetry }> {
   // Get all page paths
   const allPages = await queryBuilder.queryAll<{ 'jcr:path': string }>(
     {
@@ -241,6 +328,18 @@ async function batchedPropertyScan(
   const results: PagePropertyEntry[] = checkpoint?.results ?? [];
   const batchSize = 30;
   const startBatchIndex = checkpoint?.nextBatchIndex ?? 0;
+  const telemetry: PagePropertyReportTelemetry = {
+    strategy: 'batched-property-scan',
+    propertyReadPath: `jcr:content/${property}`,
+    candidatePageCount: pagePaths.length,
+    returnedPageCount: results.length,
+    queryHitValueCount: 0,
+    fallbackReadCount: 0,
+    fallbackValueCount: 0,
+    missingValueCount: 0,
+    readFailureCount: 0,
+    sampleHitKeys: allPages.hits[0] ? Object.keys(allPages.hits[0]).slice(0, 12) : undefined,
+  };
 
   // Process in batches of 30
   for (let i = startBatchIndex * batchSize; i < pagePaths.length; i += batchSize) {
@@ -256,6 +355,7 @@ async function batchedPropertyScan(
 
     await Promise.all(batch.map(async (pagePath) => {
       try {
+        telemetry.fallbackReadCount++;
         const jcrContent = await aemClient.getNode<Record<string, unknown>>(
           `${pagePath}/jcr:content`,
         );
@@ -264,8 +364,10 @@ async function batchedPropertyScan(
         const valueMatches = propertyValue === undefined || propertyContainsValue(value, propertyValue);
 
         if (reportMissing && !hasProperty) {
+          telemetry.missingValueCount++;
           results.push({ pagePath, propertyValue: null, isMissing: true });
         } else if (!reportMissing && hasProperty && valueMatches) {
+          telemetry.fallbackValueCount++;
           results.push({
             pagePath,
             propertyValue: Array.isArray(value) ? value.map(String) : String(value),
@@ -273,6 +375,7 @@ async function batchedPropertyScan(
           });
         }
       } catch (e) {
+        telemetry.readFailureCount++;
         logger.warn(`Could not read jcr:content for ${pagePath}`, e);
       }
     }));
@@ -289,7 +392,10 @@ async function batchedPropertyScan(
     }
   }
 
-  return results;
+  telemetry.returnedPageCount = results.length;
+  logger.info('[page-property-report] Batched property scan completed', telemetry);
+
+  return { pages: results, telemetry };
 }
 
 // ─── MSM detection ─────────────────────────────────────────────────────────────
@@ -376,10 +482,30 @@ function isIndexedProperty(property: string): boolean {
   return KNOWN_INDEXED.has(property);
 }
 
-function extractProperty(hit: Record<string, unknown>, property: string): string | string[] | null {
-  // QueryBuilder returns nested props as "jcr:content/propName"
+function extractPropertyWithSource(
+  hit: Record<string, unknown>,
+  property: string,
+): { value: string | string[] | null; source?: string } {
   const key = `jcr:content/${property}`;
-  const val = hit[key] ?? hit[property];
+  if (key in hit) {
+    return { value: normalizePropertyValue(hit[key]), source: 'query-hit-relative-path' };
+  }
+  if (property in hit) {
+    return { value: normalizePropertyValue(hit[property]), source: 'query-hit-property-name' };
+  }
+
+  const jcrContent = hit['jcr:content'];
+  if (jcrContent && typeof jcrContent === 'object' && property in jcrContent) {
+    return {
+      value: normalizePropertyValue((jcrContent as Record<string, unknown>)[property]),
+      source: 'query-hit-nested-jcr-content',
+    };
+  }
+
+  return { value: null };
+}
+
+function normalizePropertyValue(val: unknown): string | string[] | null {
   if (val === undefined || val === null) return null;
   if (Array.isArray(val)) return val.map(String);
   return String(val);
