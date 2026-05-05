@@ -26,7 +26,7 @@ Use it to answer two questions:
    - Run the main tool first.
    - Capture the returned `jobId`.
    - Poll `aem_job_status` until the job reaches a terminal state.
-5. Record each run in the verification matrix in [usefulness-validation-matrix-template.md](/abs/aem-mcp-server/docs/usefulness-validation-matrix-template.md).
+5. Record each run in the verification matrix in [usefulness-validation-matrix-template.md](/abs//abs/aem-mcp-server/docs/usefulness-validation-matrix-template.md).
 
 ## Environment Defaults
 
@@ -392,4 +392,4 @@ For every tool run, capture:
 - `Reason`
 - `Environment caveat`
 
-Use the matrix template in [usefulness-validation-matrix-template.md](/abs/aem-mcp-server/docs/usefulness-validation-matrix-template.md).
+Use the matrix template in [usefulness-validation-matrix-template.md](/abs//abs/aem-mcp-server/docs/usefulness-validation-matrix-template.md).
